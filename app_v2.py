@@ -170,9 +170,11 @@ CROP_INFO = {
 }
 
 # --- MODEL CONFIGURATION ---
-MODEL_PATH = "plant_model_v2.pth"
+# --- MODEL CONFIGURATION ---
+MODEL_PATH = "plant_model.pth"
 CLASS_NAMES_PATH = "class_names_v2.json"
-MODEL_URL = "https://github.com/santhoshinikarunakaran03-oss/plant_classifier/releases/download/v2.0/plant_model_v2.pth"
+# Point to plant_model.pth in your GitHub release (or repo path)
+MODEL_URL = "https://github.com/santhoshinikarunakaran03-oss/plant_classifier/releases/download/v2.0/plant_model.pth"
 
 @st.cache_resource
 def load_model_and_classes():
