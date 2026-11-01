@@ -10,7 +10,68 @@ import torch.nn.functional as F
 import datetime
 from supabase import create_client
 
-st.set_page_config(page_title="Crop Classifier V2 & Active Learner", page_icon="🌿", layout="centered")
+# --- PAGE CONFIGURATION ---
+st.set_page_config(
+    page_title="AgriVision AI | Precision Crop Classifier",
+    page_icon="🌿",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# --- CUSTOM CSS INJECTION ---
+st.markdown("""
+    <style>
+    /* Main Background & Fonts */
+    .main {
+        background-color: #f8f9fa;
+    }
+    
+    /* Header Container Styling */
+    .header-box {
+        background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+        padding: 24px;
+        border-radius: 12px;
+        color: white;
+        margin-bottom: 25px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    .header-box h1 {
+        color: white !important;
+        margin: 0;
+        font-weight: 700;
+    }
+    .header-box p {
+        color: #e0e0e0;
+        margin-top: 6px;
+        font-size: 1.05rem;
+    }
+
+    /* Metric & Prediction Cards */
+    .custom-card {
+        background-color: #ffffff;
+        border: 1px solid #e9ecef;
+        border-radius: 10px;
+        padding: 20px;
+        margin-bottom: 20px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.04);
+    }
+    
+    /* Active Learning Container */
+    .feedback-box {
+        background-color: #f0f7ff;
+        border-left: 5px solid #0066cc;
+        padding: 20px;
+        border-radius: 6px;
+        margin-top: 15px;
+    }
+    
+    /* Hide Default Streamlit Menu Padding */
+    .block-container {
+        padding-top: 2rem;
+        padding-bottom: 3rem;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
 # --- SUPABASE CONFIGURATION ---
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
@@ -108,6 +169,158 @@ CROP_INFO = {
     }
 }
 
-# --- MODEL V2 CONFIGURATION ---
+# --- MODEL CONFIGURATION ---
 MODEL_PATH = "plant_model_v2.pth"
 CLASS_NAMES_PATH = "class_names_v2.json"
+MODEL_URL = "https://github.com/santhoshinikarunakaran03-oss/plant_classifier/releases/download/v2.0/plant_model_v2.pth"
+
+@st.cache_resource
+def load_model_and_classes():
+    if not os.path.exists(MODEL_PATH):
+        with st.spinner("📦 Synchronizing neural network weights (v2)..."):
+            req = urllib.request.Request(
+                MODEL_URL, 
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+            )
+            try:
+                with urllib.request.urlopen(req) as response, open(MODEL_PATH, 'wb') as out_file:
+                    out_file.write(response.read())
+            except Exception as e:
+                st.error(f"Failed to fetch model weights: {e}")
+                return None, None
+
+    if not os.path.exists(CLASS_NAMES_PATH):
+        st.error("Missing target class metadata file (class_names_v2.json).")
+        return None, None
+        
+    with open(CLASS_NAMES_PATH, "r") as f:
+        class_names = json.load(f)
+        
+    model = models.resnet18(weights=None)
+    model.fc = torch.nn.Linear(model.fc.in_features, len(class_names))
+    model.load_state_dict(torch.load(MODEL_PATH, map_location=torch.device('cpu')))
+    model.eval()
+    return model, class_names
+
+model, class_names = load_model_and_classes()
+
+# --- SIDEBAR CONTROL PANEL ---
+with st.sidebar:
+    st.image("https://img.icons8.com/color/96/000000/leaf.png", width=64)
+    st.title("AgriVision Control Hub")
+    st.markdown("---")
+    st.markdown("### 📊 System Status")
+    st.success("🟢 Model Engine: **ResNet-18 (v2.0)**")
+    if supabase:
+        st.success("🟢 Cloud Sync: **Active (Supabase)**")
+    else:
+        st.warning("🟠 Cloud Sync: **Offline**")
+    
+    st.markdown("---")
+    st.markdown("### 🌾 Target Scope (16 Classes)")
+    if class_names:
+        st.caption(", ".join(class_names[:8]) + ", and 8 more...")
+    
+    st.markdown("---")
+    st.caption("Developed for Precision Agriculture & Active Learning")
+
+# --- HEADER SECTION ---
+st.markdown("""
+    <div class="header-box">
+        <h1>🌿 Precision Crop Classifier & Field Guide</h1>
+        <p>AI-powered crop identification with automated dual-threshold rejection gating and real-time active learning feedback.</p>
+    </div>
+""", unsafe_allow_html=True)
+
+if model is None:
+    st.error("Model runtime initialization failed. Check GitHub releases and logs.")
+else:
+    # --- TWO COLUMN LAYOUT ---
+    col1, col2 = st.columns([1, 1], gap="large")
+
+    with col1:
+        st.subheader("📤 Upload Leaf Sample")
+        uploaded_file = st.file_uploader("Select crop image (JPG, PNG)...", type=["jpg", "jpeg", "png"])
+
+        if uploaded_file is not None:
+            image = Image.open(uploaded_file).convert("RGB")
+            st.image(image, caption="Field Sample", use_container_width=True)
+
+    with col2:
+        if uploaded_file is not None:
+            st.subheader("🔍 Neural Inference Result")
+            
+            transform = transforms.Compose([
+                transforms.Resize((224, 224)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ])
+            input_tensor = transform(image).unsqueeze(0)
+            
+            with torch.no_grad():
+                outputs = model(input_tensor)
+                probs = F.softmax(outputs[0], dim=0)
+                confidence, predicted_idx = torch.max(probs, 0)
+                entropy = -torch.sum(probs * torch.log(probs + 1e-9)).item()
+                
+            conf_percentage = confidence.item() * 100
+            predicted_class = class_names[predicted_idx.item()]
+            
+            # Dual-threshold Rejection Gate
+            is_recognized = confidence.item() >= 0.70 and entropy <= 1.25
+            
+            if not is_recognized:
+                st.warning("⚠️ **Out of Scope / Unrecognized Plant**")
+                st.info("The sample does not match any of the 16 target crop profiles with sufficient statistical confidence.")
+            else:
+                # Custom Metric Visual Cards
+                m_col1, m_col2 = st.columns(2)
+                with m_col1:
+                    st.metric(label="Predicted Variety", value=predicted_class)
+                with m_col2:
+                    st.metric(label="Confidence Score", value=f"{conf_percentage:.1f}%")
+                
+                # --- CROP KNOWLEDGE PROFILE ---
+                if predicted_class in CROP_INFO:
+                    info = CROP_INFO[predicted_class]
+                    st.markdown("### 📖 Agricultural Profile")
+                    st.markdown(f"**Variety Name:** {info['common_name']}")
+                    st.markdown(f"**📍 Cultivation Zones:** {info['regions']}")
+                    st.markdown(f"**🌤️ Optimal Environment:** {info['thriving_env']}")
+
+    # --- FULL-WIDTH ACTIVE LEARNING PANEL ---
+    if uploaded_file is not None:
+        st.write("---")
+        st.subheader("🤖 Active Learning Field Data Collection")
+        
+        with st.container():
+            st.write("Confirming prediction accuracy directly uploads this image to our cloud dataset for automatic model retraining.")
+            
+            fb_col1, fb_col2 = st.columns([1, 2])
+            with fb_col1:
+                feedback = st.radio("Is this identification correct?", ["Yes", "No"], index=0 if is_recognized else 1)
+            
+            corrected_label = predicted_class
+            with fb_col2:
+                if feedback == "No":
+                    corrected_label = st.selectbox(
+                        "Select actual plant variety:", 
+                        class_names + ["Grass_Turf", "Unknown_Plant"]
+                    )
+                
+            if st.button("🚀 Upload Sample to Cloud Dataset", type="primary"):
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                remote_file_path = f"{corrected_label}/{timestamp}.jpg"
+                
+                temp_filename = "temp_upload_v2.jpg"
+                image.save(temp_filename)
+                
+                if supabase:
+                    with open(temp_filename, "rb") as f:
+                        supabase.storage.from_("plant-user-uploads").upload(file=f, path=remote_file_path)
+                    st.success(f"Sample registered under class **'{corrected_label}'** in Supabase Storage!")
+                else:
+                    st.error("Supabase credentials missing. Check Streamlit Secrets.")
+                    
+                if os.path.exists(temp_filename):
+                    os.remove(temp_filename)
