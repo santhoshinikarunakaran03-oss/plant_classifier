@@ -1,0 +1,38 @@
+name: Automated Retraining Pipeline
+
+on:
+  schedule:
+    - cron: '0 0 * * 0' # Automatically runs every Sunday at midnight
+  workflow_dispatch:      # Enables manual "Run workflow" button in GitHub
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install Dependencies
+      run: |
+        pip install torch torchvision pillow supabase
+
+    - name: Train & Fine-Tune Model
+      env:
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      run: |
+        python train_v2_model.py
+
+    - name: Publish Updated Model Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: v2.0
+        files: plant_model_v2.pth
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
