@@ -170,24 +170,22 @@ CROP_INFO = {
 }
 
 # --- MODEL CONFIGURATION ---
-# --- MODEL CONFIGURATION ---
-MODEL_PATH = "plant_model.pth"
+LOCAL_MODEL_FILE = "plant_model_v2_1.pth"
 CLASS_NAMES_PATH = "class_names_v2.json"
-# Point to plant_model.pth in your GitHub release (or repo path)
-MODEL_URL = "https://github.com/santhoshinikarunakaran03-oss/plant_classifier/releases/download/v2.0/plant_model.pth"
+MODEL_URL = "https://github.com/santhoshinikarunakaran03-oss/plant_classifier/releases/download/v2.1/plant_model.pth"
 
 @st.cache_resource
 def load_model_and_classes():
-    if not os.path.exists(MODEL_PATH):
-        with st.spinner("📦 Synchronizing neural network weights (v2)..."):
+    # Force fresh download if v2.1 file does not exist locally on the cloud container
+    if not os.path.exists(LOCAL_MODEL_FILE):
+        with st.spinner("📦 Synchronizing neural network weights (v2.1)..."):
             try:
                 opener = urllib.request.build_opener()
                 opener.addheaders = [('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)')]
                 urllib.request.install_opener(opener)
-                urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+                urllib.request.urlretrieve(MODEL_URL, LOCAL_MODEL_FILE)
             except Exception as e:
-                st.error(f"Failed to fetch model weights: {e}")
-                st.info("Please confirm tag is 'v2.0' and asset 'plant_model_v2.pth' is published under Releases.")
+                st.error(f"Failed to fetch model weights from v2.1 release: {e}")
                 return None, None
 
     if not os.path.exists(CLASS_NAMES_PATH):
@@ -199,7 +197,7 @@ def load_model_and_classes():
         
     model = models.resnet18(weights=None)
     model.fc = torch.nn.Linear(model.fc.in_features, len(class_names))
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=torch.device('cpu')))
+    model.load_state_dict(torch.load(LOCAL_MODEL_FILE, map_location=torch.device('cpu')))
     model.eval()
     return model, class_names
 
