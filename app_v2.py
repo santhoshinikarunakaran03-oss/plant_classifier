@@ -178,15 +178,14 @@ MODEL_URL = "https://github.com/santhoshinikarunakaran03-oss/plant_classifier/re
 def load_model_and_classes():
     if not os.path.exists(MODEL_PATH):
         with st.spinner("📦 Synchronizing neural network weights (v2)..."):
-            req = urllib.request.Request(
-                MODEL_URL, 
-                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-            )
             try:
-                with urllib.request.urlopen(req) as response, open(MODEL_PATH, 'wb') as out_file:
-                    out_file.write(response.read())
+                opener = urllib.request.build_opener()
+                opener.addheaders = [('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)')]
+                urllib.request.install_opener(opener)
+                urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
             except Exception as e:
                 st.error(f"Failed to fetch model weights: {e}")
+                st.info("Please confirm tag is 'v2.0' and asset 'plant_model_v2.pth' is published under Releases.")
                 return None, None
 
     if not os.path.exists(CLASS_NAMES_PATH):
@@ -273,7 +272,6 @@ else:
                 st.warning("⚠️ **Out of Scope / Unrecognized Plant**")
                 st.info("The sample does not match any of the 16 target crop profiles with sufficient statistical confidence.")
             else:
-                # Custom Metric Visual Cards
                 m_col1, m_col2 = st.columns(2)
                 with m_col1:
                     st.metric(label="Predicted Variety", value=predicted_class)
@@ -316,42 +314,18 @@ else:
                 image.save(temp_filename)
                 
                 if supabase:
-                    with open(temp_filename, "rb") as f:
-                        supabase.storage.from_("plant-user-uploads").upload(file=f, path=remote_file_path)
-                    st.success(f"Sample registered under class **'{corrected_label}'** in Supabase Storage!")
+                    try:
+                        with open(temp_filename, "rb") as f:
+                            supabase.storage.from_("plant-user-uploads").upload(
+                                file=f, 
+                                path=remote_file_path,
+                                file_options={"cache-control": "3600", "upsert": "true"}
+                            )
+                        st.success(f"Sample registered under class **'{corrected_label}'** in Supabase Storage!")
+                    except Exception as upload_err:
+                        st.error(f"Failed to upload to Supabase: {upload_err}")
                 else:
                     st.error("Supabase credentials missing. Check Streamlit Secrets.")
                     
                 if os.path.exists(temp_filename):
                     os.remove(temp_filename)
-                    MODEL_PATH = "plant_model_v2.pth"
-CLASS_NAMES_PATH = "class_names_v2.json"
-MODEL_URL = "https://github.com/santhoshinikarunakaran03-oss/plant_classifier/releases/download/v2.0/plant_model_v2.pth"
-
-@st.cache_resource
-def load_model_and_classes():
-    if not os.path.exists(MODEL_PATH):
-        with st.spinner("📦 Synchronizing neural network weights (v2)..."):
-            try:
-                # Use urllib with direct stream copy to follow GitHub redirects
-                opener = urllib.request.build_opener()
-                opener.addheaders = [('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)')]
-                urllib.request.install_opener(opener)
-                urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
-            except Exception as e:
-                st.error(f"Failed to fetch model weights: {e}")
-                st.info("Please confirm tag is 'v2.0' and asset 'plant_model_v2.pth' is published under Releases.")
-                return None, None
-
-    if not os.path.exists(CLASS_NAMES_PATH):
-        st.error("Missing target class metadata file (class_names_v2.json).")
-        return None, None
-        
-    with open(CLASS_NAMES_PATH, "r") as f:
-        class_names = json.load(f)
-        
-    model = models.resnet18(weights=None)
-    model.fc = torch.nn.Linear(model.fc.in_features, len(class_names))
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=torch.device('cpu')))
-    model.eval()
-    return model, class_names
