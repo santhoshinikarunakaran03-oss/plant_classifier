@@ -7,6 +7,10 @@ import json
 import os
 import urllib.request
 import math
+import io
+import uuid
+from datetime import datetime
+from supabase import create_client, Client
 
 # --- 1. PAGE CONFIGURATION ---
 st.set_page_config(
@@ -20,7 +24,21 @@ MODEL_PATH = os.path.join(BASE_DIR, "plant_model.pth")
 CLASS_NAMES_PATH = os.path.join(BASE_DIR, "class_names_v2.json")
 MODEL_URL = "https://github.com/santhoshinikarunakaran03-oss/plant_classifier/releases/download/v2.1/plant_model.pth"
 
-# --- 2. CROP METADATA DATABASE (Applications & Descriptions) ---
+# --- 2. SUPABASE INITIALIZATION ---
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://your-supabase-project.supabase.co")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "your-supabase-anon-key")
+
+@st.cache_resource
+def init_supabase() -> Client:
+    try:
+        return create_client(SUPABASE_URL, SUPABASE_KEY)
+    except Exception as e:
+        st.warning(f"Supabase connection uninitialized: {e}")
+        return None
+
+supabase = init_supabase()
+
+# --- 3. CROP METADATA DATABASE ---
 CROP_METADATA = {
     "Barnyard_millet": {
         "category": "Millet / Cereal",
@@ -104,7 +122,7 @@ CROP_METADATA = {
     }
 }
 
-# --- 3. MODEL & METADATA INITIALIZATION ---
+# --- 4. MODEL & METADATA INITIALIZATION ---
 def download_model_if_missing():
     if not os.path.exists(MODEL_PATH):
         st.info("⬇️ Downloading trained model weights (v2.1)... Please wait.")
@@ -137,7 +155,7 @@ def load_trained_model():
 
 model, device = load_trained_model()
 
-# --- 4. PREPROCESSING & INFERENCE ---
+# --- 5. PREPROCESSING & INFERENCE ---
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
@@ -153,25 +171,80 @@ def predict_top_k(image, k=3):
         outputs = model(img_tensor)
         probabilities = torch.nn.functional.softmax(outputs[0], dim=0).tolist()
     
-    # Sort top-k predictions
     top_indices = sorted(range(len(probabilities)), key=lambda i: probabilities[i], reverse=True)[:k]
     top_predictions = [
-        (class_names[idx], probabilities[idx] * 100) for idx in top_indices
+        {"class": class_names[idx], "confidence": float(round(probabilities[idx] * 100, 2))} 
+        for idx in top_indices
     ]
     
-    top_confidence = top_predictions[0][1]
+    top_confidence = top_predictions[0]["confidence"]
     entropy = calculate_entropy(probabilities)
     
     return top_predictions, top_confidence, entropy
 
-# --- 5. DASHBOARD LAYOUT ---
+# --- 6. SUPABASE LOGGING FUNCTIONS ---
+def upload_image_and_log_inference(image, top_3_preds, entropy, status):
+    if not supabase:
+        return None
+    
+    try:
+        # Convert PIL image to Bytes
+        img_byte_arr = io.BytesIO()
+        image.save(img_byte_arr, format='JPEG')
+        img_bytes = img_byte_arr.getvalue()
+        
+        # Generate unique storage filename
+        filename = f"{uuid.uuid4().hex}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+        
+        # 1. Upload to Supabase Storage Bucket
+        supabase.storage.from_("plant-user-uploads").upload(filename, img_bytes, {"content-type": "image/jpeg"})
+        image_url = supabase.storage.from_("plant-user-uploads").get_public_url(filename)
+        
+        # 2. Insert record into Supabase DB Table ('inference_logs')
+        log_entry = {
+            "image_url": image_url,
+            "predicted_class": top_3_preds[0]["class"],
+            "top_1_confidence": top_3_preds[0]["confidence"],
+            "top_2_class": top_3_preds[1]["class"],
+            "top_2_confidence": top_3_preds[1]["confidence"],
+            "top_3_class": top_3_preds[2]["class"],
+            "top_3_confidence": top_3_preds[2]["confidence"],
+            "entropy": float(round(entropy, 4)),
+            "classification_status": status,
+            "created_at": datetime.utcnow().isoformat()
+        }
+        
+        response = supabase.table("inference_logs").insert(log_entry).execute()
+        if response.data:
+            return response.data[0]["id"]
+    except Exception as e:
+        st.warning(f"Note: Could not log session to cloud database: {e}")
+    return None
+
+def submit_feedback(log_id, is_correct, corrected_class, comments):
+    if not supabase or not log_id:
+        return
+    try:
+        feedback_entry = {
+            "inference_log_id": log_id,
+            "is_correct": is_correct,
+            "corrected_class": corrected_class if not is_correct else None,
+            "comments": comments,
+            "submitted_at": datetime.utcnow().isoformat()
+        }
+        supabase.table("user_feedback").insert(feedback_entry).execute()
+        st.success("✅ Thank you! Your feedback has been recorded into Supabase.")
+    except Exception as e:
+        st.error(f"Failed to transmit feedback: {e}")
+
+# --- 7. DASHBOARD LAYOUT ---
 st.title("🌱 Crop Classifier & Agricultural Knowledge Base")
 st.caption("Version 2.1 | PyTorch ResNet-18 Transfer Learning")
 
 col_left, col_right = st.columns([1, 1.2])
 
 with col_left:
-    st.subheader("Upload Sample")
+    st.subheader("Upload Leaf Sample")
     uploaded_file = st.file_uploader("Choose a leaf image...", type=["jpg", "jpeg", "png"])
     if uploaded_file:
         image = Image.open(uploaded_file).convert("RGB")
@@ -180,35 +253,68 @@ with col_left:
 with col_right:
     st.subheader("Inference Analysis")
     if uploaded_file:
-        with st.spinner("Calculating feature vectors..."):
+        with st.spinner("Executing model inference & cloud sync..."):
             top_3_preds, top_conf, entropy = predict_top_k(image, k=3)
         
         CONFIDENCE_THRESHOLD = 70.0
         ENTROPY_THRESHOLD = 1.25
         
-        # --- CASE A: CONFIDENT CLASSIFICATION ---
-        if top_conf >= CONFIDENCE_THRESHOLD and entropy <= ENTROPY_THRESHOLD:
-            top_class, confidence = top_3_preds[0]
-            st.success(f"### Predicted Crop: **{top_class}**")
-            st.metric(label="Confidence Score", value=f"{confidence:.2f}%")
+        status = "CONFIDENT" if (top_conf >= CONFIDENCE_THRESHOLD and entropy <= ENTROPY_THRESHOLD) else "UNRECOGNIZED"
+        
+        # Auto-log inference to Supabase
+        if "logged_id" not in st.session_state or st.session_state.get("last_uploaded") != uploaded_file.name:
+            st.session_state["logged_id"] = upload_image_and_log_inference(image, top_3_preds, entropy, status)
+            st.session_state["last_uploaded"] = uploaded_file.name
+
+        # --- DISPLAY TOP 3 CONFIDENCE SCORES ---
+        st.markdown("### Top 3 Probabilities")
+        for i, pred in enumerate(top_3_preds, 1):
+            st.progress(pred["confidence"] / 100.0, text=f"**#{i} {pred['class']}**: {pred['confidence']:.2f}%")
             
+        st.markdown("---")
+
+        # --- CASE A: CONFIDENT CLASSIFICATION ---
+        if status == "CONFIDENT":
+            top_class = top_3_preds[0]["class"]
+            st.success(f"### Predicted Crop: **{top_class}**")
             meta = CROP_METADATA.get(top_class, {})
-            st.markdown("---")
             st.markdown(f"**Category:** {meta.get('category', 'N/A')}")
             st.markdown(f"**Primary Applications:** {meta.get('uses', 'N/A')}")
             st.markdown(f"**Morphological Features:** {meta.get('key_traits', 'N/A')}")
             
-        # --- CASE B: UNRECOGNIZED / LOW CONFIDENCE (TOP 3 FALLBACK) ---
+        # --- CASE B: UNRECOGNIZED / LOW CONFIDENCE FALLBACK ---
         else:
             st.warning("⚠️ **Unrecognized / Low Confidence Leaf Sample**")
             st.caption(f"Top confidence ({top_conf:.2f}%) or entropy ({entropy:.4f}) indicates high uncertainty.")
-            st.info("### Closest Candidate Matching Crops")
+            st.info("### Top Candidate Matches")
             
-            for idx, (c_name, c_prob) in enumerate(top_3_preds, 1):
+            for idx, pred in enumerate(top_3_preds, 1):
+                c_name = pred["class"]
+                c_prob = pred["confidence"]
                 meta = CROP_METADATA.get(c_name, {})
-                with st.expander(f"**#{idx} Candidate: {c_name} ({c_prob:.2f}% Match)**", expanded=(idx==1)):
-                    st.write(f"**Classification Category:** {meta.get('category', 'N/A')}")
+                with st.expander(f"**#{idx} Candidate: {c_name} ({c_prob:.2f}%)**", expanded=(idx==1)):
+                    st.write(f"**Category:** {meta.get('category', 'N/A')}")
                     st.write(f"**Agricultural Uses:** {meta.get('uses', 'N/A')}")
-                    st.write(f"**Key Visual Traits:** {meta.get('key_traits', 'N/A')}")
+                    st.write(f"**Key Traits:** {meta.get('key_traits', 'N/A')}")
+
+        # --- 8. USER FEEDBACK BACK TO SUPABASE ---
+        st.markdown("---")
+        st.subheader("💬 Model Feedback")
+        st.caption("Help improve our retraining pipeline by verifying this prediction.")
+        
+        with st.form("feedback_form"):
+            is_correct = st.radio("Is this prediction correct?", ["Yes, correct", "No, incorrect"], index=0) == "Yes, correct"
+            corrected_class = st.selectbox(
+                "If incorrect, select the actual crop class:",
+                ["Select correct crop..."] + class_names,
+                disabled=is_correct
+            )
+            comments = st.text_input("Additional notes or observations:")
+            
+            submit_btn = st.form_submit_button("Submit Feedback to Cloud")
+            
+            if submit_btn:
+                selected_corr = corrected_class if corrected_class != "Select correct crop..." else None
+                submit_feedback(st.session_state.get("logged_id"), is_correct, selected_corr, comments)
     else:
-        st.info("Upload an image on the left panel to execute model inference.")
+        st.info("Upload an image on the left panel to execute model inference and logging.")
