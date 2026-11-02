@@ -3,7 +3,7 @@ name: Automated Retraining Pipeline
 on:
   schedule:
     - cron: '0 0 * * 0' # Automatically runs every Sunday at midnight
-  workflow_dispatch:      # Enables manual "Run workflow" button in GitHub
+  workflow_dispatch:      # Allows manual trigger from GitHub Actions tab
 
 jobs:
   retrain:
@@ -22,17 +22,24 @@ jobs:
       run: |
         pip install torch torchvision pillow supabase
 
-    - name: Train & Fine-Tune Model
+    - name: Run Retraining Script
       env:
         SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
         SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
       run: |
-        python train_v2_model.py
+        # Checks if train_model.py is at root or inside dataset/ folder
+        if [ -f "train_model.py" ]; then
+          python train_model.py
+        elif [ -f "dataset/train_model.py" ]; then
+          python dataset/train_model.py
+        fi
 
     - name: Publish Updated Model Release
       uses: softprops/action-gh-release@v1
       with:
-        tag_name: v2.0
-        files: plant_model_v2.pth
+        tag_name: v2.1
+        files: |
+          plant_model.pth
+          plant_model_v2.pth
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
